@@ -1,4 +1,7 @@
-package container
+
+
+
+package main
 import (
     "encoding/json"
     "errors"
@@ -7,16 +10,64 @@ import (
     "reflect"
  //  "github.com/mcuadros/go-jsonschema-generator"
 "github.com/hyperledger/fabric/core/chaincode/shim"
- "github.com/hyperledger/fabric/core/util"
- common "github.com/hyperledger/fabric/examples/chaincode/go/iot/common"
- schemas "github.com/hyperledger/fabric/examples/chaincode/go/iot/schemas"
 )
 
+
+const CONTRACTSTATEKEY string = "CONTSTATEKEY" 
+
+const BLSTATE string = "_STATE"
+// const CONTHIST string = "_HIST"
+
+type ContractState struct {
+    Version         string                        `json:"version"`
+    ComplianceCC    string                        `json:"compliancecc"`
+}   
+//const DEFAULT_SCHEMA = "http://json-schema.org/schema#"
+
+const MYVERSION string = "1.0.0"
+
+type variation string
+
+const (
+    normal variation ="normal"
+    above ="above"
+    below = "below" 
+)   
 
 // These are common alerts reported by sensor. Example Tetis. 
 // http://www.starcomsystems.com/download/Tetis_ENG.pdf 
 
-
+type Alerts struct {
+     TempAlert      *variation `json:"tempalert,omitempty"`
+     HumAlert       *variation `json:"humalert,omitempty"`
+     LightAlert     *variation `json:"lightalert,omitempty"` 
+     AccAlert       *variation `json:"accalert,omitempty"`
+     DoorAlert      *bool      `json:"dooralert,omitempty"`
+}
+// This is  optional. It stands for the 'acceptable range', say 1 degree of lat and long
+// at which the container should be, before it is considered 'arrived' at 'Notified Party' location'
+// If not sent in, some default could be assumed (say 1 degree or )
+type NotifyRange struct {
+    LatRange        float64 `json:"latrange,omitempty"`
+    LongRange       float64 `json:"longrange,omitempty"`
+}
+type BillOfLadingRegistration struct {
+    BLNo                 *string                  `json:"blno"` 
+    ContainerNos         *string                  `json:"containernos"`    // Comma separated container numbers - keep json simple    
+    Hazmat               *bool                    `json:"hazmat,omitempty"`     // shipment hazardous ?
+    MinTemperature       *float64                 `json:"mintemperature,omitempty"` //split range to min and max: Jeff's input
+    MaxTemperature       *float64                 `json:"maxtemperature,omitempty"` 
+    MinHumidity          *float64                 `json:"minhumidity,omitempty"` //split range to min and max: Jeff's input
+    MaxHumidity          *float64                 `json:"maxhumidity,omitempty"`
+    MinLight             *float64                 `json:"minlight,omitempty"` //split range to min and max: Jeff's input
+    MaxLight             *float64                 `json:"maxlight,omitempty"` 
+    MinAcceleration      *float64                 `json:"minacceleration,omitempty"` //split range to min and max: Jeff's input
+    MaxAcceleration      *float64                 `json:"maxacceleration,omitempty"`
+ //NotifyLocations      *[]Geolocation            `json:"notifylocations,omitempty"` // No implementation right now
+ //NotifyRange          *NotifyRange              `json:"notifyrange,omitempty"`     // To be integrated when shipping part gets sorted out
+    TransitComplete       *bool                    `json:"transitcomplete,omitempty"`
+    Timestamp            *string                      `json:"timestamp"`
+}
 // This is a logistics contract, written in the context of shipping. It tracks the progress of a Bill of Lading 
 // and associated containers, and raises alerts in case of violations in expected conditions
 
@@ -29,58 +80,87 @@ import (
 
 // Assumption 3. A shipment may switch from one container to another in transit, for various reasons. We are assuming,
 // for simplicity, that the same containers are used for end to end transit.
+type Geolocation struct {
+    Latitude    float64 `json:"latitude,omitempty"`
+    Longitude   float64 `json:"longitude,omitempty"`
+}
+
+//Structure for logistics data at the container level
+type ContainerLogistics struct {
+    ContainerNo         *string                         `json:"containerno"`    
+    BLNo                *string                         `json:"blno,omitempty"`    
+    Location            *Geolocation                    `json:"location,omitempty"`       // current asset location
+    Carrier             *string                         `json:"carrier,omitempty"`        // the name of the carrier
+    Timestamp           *string                         `json:"timestamp"`          
+    Temperature         *float64                        `json:"temperature,omitempty"`    // celcius
+    Humidity            *float64                        `json:"humidity,omitempty"` // percent
+    Light               *float64                        `json:"light,omitempty"` // lumen
+    Acceleration        *float64                        `json:"acceleration,omitempty"`
+    DoorClosed          *bool                           `json:"doorclosed,omitempty"`
+    Extra               *json.RawMessage                `json:"extra,omitempty"`  
+    AlertRecord         *string                         `json:"alerts,omitempty"`  
+    TransitComplete     *bool                           `json:"transitcomplete,omitempty"`
+}
 
 
 // SimpleChaincode example simple Chaincode implementation
 type SimpleChaincode struct {
 }
-
+// Compliance record structure
+type ComplianceState struct {
+    BLNo                 *string                     `json:"blno"` 
+    Type                 *string                     `json:"type"` // Default: DEFTYPE
+    Compliance           *bool                       `json:"compliance"`
+    AssetAlerts          *map[string]string          `json:"assetalerts"`
+    Active               *bool                       `json:"active,omitempty"`
+    Timestamp            *string                      `json:"timestamp"`
+}
 //Container History
 type ContainerHistory struct {
-    ContHistory []string `json:"conthistory"`
+	ContHistory []string `json:"conthistory"`
 }
-var contractState = common.ContContractState{common.MYVERSION, ""}
-
+var contractState = ContractState{MYVERSION, ""}
+var blDefn BillOfLadingRegistration
 
 //************* main *******************
 //Create SimpleChaincode instance
 //************* main *******************
 
 func main() {
-    err := shim.Start(new(SimpleChaincode))
-    if err != nil {
-        fmt.Printf("Error starting Simple Chaincode: %s", err)
-    }
+	err := shim.Start(new(SimpleChaincode))
+	if err != nil {
+		fmt.Printf("Error starting Simple Chaincode: %s", err)
+	}
 }
 
 
 // ************************************
 // invoke callback mode 
 // ************************************
-func (t *SimpleChaincode) Invoke(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
-    if function == "createContainerLogistics" {
-        // create container records
-        return t.createContainerLogistics(stub, args)
+func (t *SimpleChaincode) Invoke(stub *shim.ChaincodeStub, function string, args []string) ([]byte, error) {
+	if function == "createContainerLogistics" {
+		// create container records
+		return t.createContainerLogistics(stub, args)
     } else if function =="updateContainerLogistics" {
         return t.updateContainerLogistics(stub, args)
     } 
-    fmt.Println("Unknown invocation function: ", function)
-    return nil, errors.New("Received unknown invocation: " + function)
+	fmt.Println("Unknown invocation function: ", function)
+	return nil, errors.New("Received unknown invocation: " + function)
 }
 
 // ************************************
 // query callback mode 
 // ************************************
-func (t *SimpleChaincode) Query(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
-    // Handle different Query functions 
-    if function =="readContainerLogisitcsSchemas" {
-        return t.readContainerLogisitcsSchemas(stub, args)
+func (t *SimpleChaincode) Query(stub *shim.ChaincodeStub, function string, args []string) ([]byte, error) {
+	// Handle different Query functions 
+	if function =="readContainerLogisitcsSchema" {
+        return t.readContainerLogisitcsSchema(stub, args)
     } else if function =="readContainerCurrentStatus" {
         return t.readContainerCurrentStatus(stub, args)
     } else if function =="readContainerHistory" {
             return t.readContainerHistory(stub, args)
-    } 
-    return nil, errors.New("Received unknown invocation: " + function)
+    }
+	return nil, errors.New("Received unknown invocation: " + function)
 }                   
 // ************************************
 // deploy functions 
@@ -90,9 +170,9 @@ func (t *SimpleChaincode) Query(stub shim.ChaincodeStubInterface, function strin
 //Chaincode initialization
 //************* init *******************
 
-func (t *SimpleChaincode) Init(stub shim.ChaincodeStubInterface,  function string, args []string) ([]byte, error) {
-    var stateArg common.ContContractState
-    var err error
+func (t *SimpleChaincode) Init(stub *shim.ChaincodeStub,  function string, args []string) ([]byte, error) {
+	var stateArg ContractState
+	var err error
 
     if len(args) != 1 {
         return nil, errors.New("init expects one argument, a JSON string with tagged version string and chaincode uuid for the compliance")
@@ -101,8 +181,8 @@ func (t *SimpleChaincode) Init(stub shim.ChaincodeStubInterface,  function strin
     if err != nil {
         return nil, errors.New("Version argument unmarshal failed: " + fmt.Sprint(err))
     }
-    if stateArg.Version != common.MYVERSION {
-        return nil, errors.New("Contract version " + common.MYVERSION + " must match version argument: " + stateArg.Version)
+    if stateArg.Version != MYVERSION {
+        return nil, errors.New("Contract version " + MYVERSION + " must match version argument: " + stateArg.Version)
     }
     // set the chaincode uuid of the compliance contract 
     // to the global variable
@@ -115,7 +195,7 @@ func (t *SimpleChaincode) Init(stub shim.ChaincodeStubInterface,  function strin
     if err != nil {
         return nil, errors.New("Marshal failed for contract state" + fmt.Sprint(err))
     }
-    err = stub.PutState(common.CONTSTATEKEY, contractStateJSON)
+    err = stub.PutState(CONTRACTSTATEKEY, contractStateJSON)
     if err != nil {
         return nil, errors.New("Contract state failed PUT to ledger: " + fmt.Sprint(err))
     }
@@ -126,13 +206,11 @@ func (t *SimpleChaincode) Init(stub shim.ChaincodeStubInterface,  function strin
 // invoke functions 
 // ************************************
 
-func (t *SimpleChaincode) createContainerLogistics(stub shim.ChaincodeStubInterface, args []string) ([]byte, error) {
-    var contInit common.BillOfLadingRegistration
-    //var blDefn common.BillOfLadingRegistration
-    var err error
-    var contState, oldContState common.ContainerLogistics
+func (t *SimpleChaincode) createContainerLogistics(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
+    var contInit BillOfLadingRegistration
+	var err error
+    var contState, oldContState ContainerLogistics
     //var contHistory ContainerHistory
-    
     if len(args) != 1 {
         return nil, errors.New("Expects one argument, a JSON string with bill of lading and container details")
     }
@@ -140,10 +218,9 @@ func (t *SimpleChaincode) createContainerLogistics(stub shim.ChaincodeStubInterf
     if err != nil {
         return nil, errors.New("Unable to unmarshal container init " + fmt.Sprint(err))
     }
+    // Put the bill of lading data in the global variable, so that the container's
     // validation again B/L rules can be easily accomplished
-    //blDefn = contInit
-    fmt.Println("Max temp: ", *contInit.MaxTemperature)
-     fmt.Println("Min temp: ", *contInit.MinTemperature)
+    blDefn = contInit
     fmt.Println("Splitting the container list")
     bKey:=*contInit.BLNo
     sContainers:=strings.Split(*contInit.ContainerNos, ",")
@@ -155,7 +232,7 @@ func (t *SimpleChaincode) createContainerLogistics(stub shim.ChaincodeStubInterf
         bCreateContRecord := true // create a new container record
         //This creates a map of [container number] [alerts] with compliance as a true 
         sContKey:=sContainers[i]
-        mTemp[sContKey]= "" // initializing alerts as a blank string
+	    mTemp[sContKey]= "" // initializing alerts as a blank string
         // Create an initial ContainerLogisitcs record for each container, in the stub
         // Use the container number for the records. If there is an exisitng record,
         //  update it by appending the B/L. 
@@ -229,12 +306,6 @@ func (t *SimpleChaincode) createContainerLogistics(stub shim.ChaincodeStubInterf
                 return nil, errors.New("container history failed PUT to ledger: " + fmt.Sprint(err))
             } 
             fmt.Println("New container record generated", string(contJSON))
-            // Put Bill Of Lading reg data in the stub to minimize cross-chaincode calls
-            err = stub.PutState(bKey, []byte(args[0]))
-            if err != nil {
-                return nil, errors.New("Bill of Lading data failed PUT to ledger: " + fmt.Sprint(err))
-            } 
-            fmt.Println("Bill of Lading rules captured", args[0])
             
         }        
     }
@@ -243,12 +314,12 @@ func (t *SimpleChaincode) createContainerLogistics(stub shim.ChaincodeStubInterf
  
  /************************ updateContainerLogistics ********************/
 
-func (t *SimpleChaincode) updateContainerLogistics(stub shim.ChaincodeStubInterface, args []string) ([]byte, error) {
-    var err error
-    var contState, contIn   common.ContainerLogistics
-    var compState common.ComplianceState
+func (t *SimpleChaincode) updateContainerLogistics(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
+	var err error
+    var contState, contIn   ContainerLogistics
+    var compState ComplianceState
     var containerHistory ContainerHistory
-    var contractState common.ContContractState
+    var contractState ContractState
     //var oldAlert, newAlert  Alerts
     
     
@@ -258,10 +329,10 @@ func (t *SimpleChaincode) updateContainerLogistics(stub shim.ChaincodeStubInterf
     //If yes, invoke the shipping contract for notiifcation - on hold now - only the state gets updated today
      if len(args) !=1 {
         err = errors.New("Incorrect number of arguments. Expecting a single JSON string with mandatory Container Number and optional details")
-        fmt.Println(err)
-        return nil, err
-    }
-    jsonData:=args[0]
+		fmt.Println(err)
+		return nil, err
+	}
+	jsonData:=args[0]
     conJSON := []byte(jsonData)
     fmt.Println("Input Container data arg: ", jsonData)
     
@@ -269,16 +340,15 @@ func (t *SimpleChaincode) updateContainerLogistics(stub shim.ChaincodeStubInterf
     err = json.Unmarshal(conJSON, &contIn)
     if err != nil {
         //err = errors.New("Unable to unmarshal input JSON data")
-        fmt.Println(err)
-        return nil, err
+		fmt.Println(err)
+		return nil, err
     }
-    fmt.Println(" contIn after unmarshaling [", contIn, "]")  
-    //contIn.ContainerNo=contIn.AssetID      
+    fmt.Println(" contIn after unmarshaling [", contIn, "]")        
      if contIn.ContainerNo==nil{
          fmt.Println(" Container number is nil")
         err = errors.New("Container number is mandatory")
         fmt.Println(err)
-        return nil, err
+		return nil, err
      }
      
      // Container can't be an empty string
@@ -343,7 +413,7 @@ func (t *SimpleChaincode) updateContainerLogistics(stub shim.ChaincodeStubInterf
         //*************************************************************************
     // Invoke the compliance contract to create and maintain the B/L compliance
         //get compliance contract uuid from the stub
-        contractStateJSON, err := stub.GetState(common.CONTSTATEKEY)
+        contractStateJSON, err := stub.GetState(CONTRACTSTATEKEY)
         if err != nil {
             return nil,errors.New("Unable to fetch container and compliance contract keys")
         }
@@ -373,14 +443,11 @@ func (t *SimpleChaincode) updateContainerLogistics(stub shim.ChaincodeStubInterf
             //fmt.Println(err)
             return nil, err
         }
-        
-        //////////////////////
         invokeArgs := string(compJSON)
         var callArgs = make([]string, 0)
-        callArgs = append(callArgs, f)
         callArgs = append(callArgs, invokeArgs)
       
-        _, err = stub.InvokeChaincode(complianceChainCode, util.ToChaincodeArgs(callArgs...))
+        _, err = stub.InvokeChaincode(complianceChainCode, f, callArgs)
         if err != nil {
             errStr := fmt.Sprintf("Failed to invoke chaincode. Got error: %s", err.Error())
             fmt.Printf(errStr)
@@ -440,9 +507,9 @@ func (t *SimpleChaincode) updateContainerLogistics(stub shim.ChaincodeStubInterf
 // ************************************
 // This is a 'convenience' function, to provide the consumer of a contract an example of 
 // the Bill of Lading definition dataset.
-func (t *SimpleChaincode) readContainerLogisitcsSamples(stub shim.ChaincodeStubInterface, args []string) ([]byte, error) {
+func (t *SimpleChaincode) readContainerLogisitcsSchema(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
     cont := []byte(`{ "ContainerNo":"MSKU000000","Location" :{"Latitude":10, "Longitude":15}, "Temperature":2, 
-        "Carrier":"Carrier", "Timestamp":"2016-03-03T20:27:23.969676659Z", "Humidity":15, "Light":5,
+        "Carrier":"Maersk", "Timestamp":"2016-03-03T20:27:23.969676659Z", "Humidity":15, "Light":5,
     "DoorClosed":true, "Acceleration":0}`)
     return cont, nil
 }
@@ -451,15 +518,15 @@ func (t *SimpleChaincode) readContainerLogisitcsSamples(stub shim.ChaincodeStubI
 // getContainerCurrentStatus
 // ************************************
 // This returns the container data
-func (t *SimpleChaincode) readContainerCurrentStatus(stub shim.ChaincodeStubInterface, args []string) ([]byte, error) {
+func (t *SimpleChaincode) readContainerCurrentStatus(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
     var err error
-    var  contIn   common.ContainerLogistics
+    var  contIn   ContainerLogistics
     if len(args) !=1 {
         err = errors.New("Incorrect number of arguments. Expecting a single JSON string with mandatory Container Number")
-        fmt.Println(err)
-        return nil, err
-    }
-    jsonData:=args[0]
+		fmt.Println(err)
+		return nil, err
+	}
+	jsonData:=args[0]
     conJSON := []byte(jsonData)
     fmt.Println("Input Container data arg: ", jsonData)
     
@@ -467,15 +534,15 @@ func (t *SimpleChaincode) readContainerCurrentStatus(stub shim.ChaincodeStubInte
     err = json.Unmarshal(conJSON, &contIn)
     if err != nil {
         //err = errors.New("Unable to unmarshal input JSON data")
-        fmt.Println(err)
-        return nil, err
+		fmt.Println(err)
+		return nil, err
     }
     fmt.Println(" contIn after unmarshaling [", contIn, "]")        
      if contIn.ContainerNo==nil{
          fmt.Println(" Container number is nil")
         err = errors.New("Container number is mandatory")
         fmt.Println(err)
-        return nil, err
+		return nil, err
      }
      
      // Container can't be an empty string
@@ -496,20 +563,17 @@ func (t *SimpleChaincode) readContainerCurrentStatus(stub shim.ChaincodeStubInte
     }
     return contData, nil
 }
-func (t *SimpleChaincode) readContainerLogisitcsSchemas(stub shim.ChaincodeStubInterface, args []string) ([]byte, error) {
-    return []byte(schemas.Schemas), nil
-}
 /*********************************  resetContainerHistory ****************************/
- func (t *SimpleChaincode) readContainerHistory(stub shim.ChaincodeStubInterface, args []string) ([]byte, error) {
-    var  contIn   common.ContainerLogistics
+ func (t *SimpleChaincode) readContainerHistory(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
+    var  contIn   ContainerLogistics
     //var contHist  ContainerHistory
     var err error
     if len(args) !=1 {
         err = errors.New("Incorrect number of arguments. Expecting a single JSON string with mandatory Container Number")
-        fmt.Println(err)
-        return nil, err
-    }
-    jsonData:=args[0]
+		fmt.Println(err)
+		return nil, err
+	}
+	jsonData:=args[0]
     conJSON := []byte(jsonData)
     fmt.Println("Input Container data arg: ", jsonData)
     
@@ -517,15 +581,15 @@ func (t *SimpleChaincode) readContainerLogisitcsSchemas(stub shim.ChaincodeStubI
     err = json.Unmarshal(conJSON, &contIn)
     if err != nil {
         //err = errors.New("Unable to unmarshal input JSON data")
-        fmt.Println(err)
-        return nil, err
+		fmt.Println(err)
+		return nil, err
     }
     fmt.Println(" contIn after unmarshaling [", contIn, "]")        
      if contIn.ContainerNo==nil{
          fmt.Println(" Container number is nil")
         err = errors.New("Container number is mandatory")
         fmt.Println(err)
-        return nil, err
+		return nil, err
      }
      
     contHistKey := *contIn.ContainerNo+"_HISTORY"
@@ -541,72 +605,112 @@ func (t *SimpleChaincode) readContainerLogisitcsSchemas(stub shim.ChaincodeStubI
 // alertsCheck
 // ************************************
 // This is an 'internal' function, to check for alert
-func (t *SimpleChaincode) alertsCheck(stub shim.ChaincodeStubInterface, contIn common.ContainerLogistics) ([]byte,  error) {
+func (t *SimpleChaincode) alertsCheck(stub *shim.ChaincodeStub, contIn ContainerLogistics) ([]byte,  error) {
     // I will rework thisd - possibly with reflection
-    var blDefn common.BillOfLadingRegistration
-    var blReg common.BillOfLadingRegistration 
+    
+    var blReg BillOfLadingRegistration 
     //alerts will not get raised: blReg doesn't exist today in state
     // Expensive?
-
-    var alert =new(common.Alerts)
+    
+    var alert =new(Alerts)
     var contAlert []byte
-    var val common.Variation
+    var val variation
     
     bKey:= *contIn.BLNo
     fmt.Println("B/L number  inside alertscheck is ",bKey)
     complianceAlert := false
     //  use value in global variable to check alerts compliance.
-    blData, err := stub.GetState(bKey)
-    if err!=nil {
-        err:=errors.New("Unable to retrieve Bill of Lading data from the stub")
-        fmt.Println(err)
-        return nil, err
-    }
-     err = json.Unmarshal(blData, &blDefn)
-    if err != nil {
-        return nil, errors.New("Bill of Lading record unmarshal failed: " + fmt.Sprint(err))
-    }
     blReg = blDefn
-    //Temperature check
-    var actVal = contIn.Temperature
-    if (actVal!=nil) {
-         val, _ = t.inRange(blReg.MinTemperature, blReg.MaxTemperature, actVal)
-        if (val !=common.Normal) {
-            alert.TempAlert = &val
-            complianceAlert = true
-        }
-    }
-     cAlert, err := json.Marshal(&alert)
-        fmt.Println(string(cAlert))
-    //Humidity Check
-    actVal = contIn.Humidity
-     if (actVal!=nil) {
-        val,_ = t.inRange(blReg.MinHumidity, blReg.MaxHumidity, actVal)
-        if (val !=common.Normal) {
-            alert.HumAlert = &val
-            complianceAlert = true
-        }
-     }
-     cAlert, err = json.Marshal(&alert)
-        fmt.Println(string(cAlert))
-    //Light Check
-    actVal = contIn.Light
-    if (actVal!=nil) {
-        val,_ = t.inRange(blReg.MinLight, blReg.MaxLight, actVal)
-        if (val !=common.Normal) {
-            alert.LightAlert = &val
-            complianceAlert = true
-        }
-    }
-    // Acceleration check
-    actVal = contIn.Acceleration
-    if (actVal!=nil) {
-        val,_ = t.inRange(blReg.MinAcceleration, blReg.MaxAcceleration, actVal)
-        if (val !=common.Normal) {
-            alert.AccAlert = &val
-            complianceAlert = true
-        }
-    }
+    
+    // Temperature alert check
+   if (blReg.MinTemperature!=nil || blReg.MaxTemperature!=nil) && (contIn.Temperature!=nil) {
+       // There is at least one of temp min or max set in the B/L definition and incoming container data has
+       //  a temperature reading. We need to perform a temperature alert check
+       tempIn:= *contIn.Temperature
+       fmt.Println("Temp in: ", tempIn)
+       if blReg.MaxTemperature!=nil {
+           fmt.Println("In max temp check")
+           if tempIn > *blReg.MaxTemperature {
+               fmt.Println("In max temp check 2")
+               val =above
+               alert.TempAlert = &val
+               complianceAlert = true
+           }
+       } else if blReg.MinTemperature!=nil {
+           fmt.Println("In min temp check")
+           if tempIn < *blReg.MinTemperature {
+               fmt.Println("In min temp check 2")
+               val =below
+               alert.TempAlert = &val
+               complianceAlert = true
+           }
+       }
+   }
+   fmt.Println("After temp alert check")
+   // Humidity alert check
+   if (blReg.MinHumidity!=nil || blReg.MaxHumidity!=nil) && (contIn.Humidity!=nil) {
+       // There are humidity min or max set in the B/L definition and incoming container data has
+       //  a humidity reading. We need to perform a humidity alert check
+       humIn:= *contIn.Humidity
+       if blReg.MaxHumidity!=nil {
+           if humIn > *blReg.MaxHumidity {
+               val = above
+               alert.HumAlert = &val
+               complianceAlert = true
+           }
+       } else if blReg.MinHumidity!=nil {
+           if humIn < *blReg.MinHumidity {
+               val = below
+               alert.HumAlert = &val
+                complianceAlert = true
+           }
+       }
+   }
+   fmt.Println("After humidity alert check")
+   // light alert check
+   if (blReg.MinLight!=nil || blReg.MaxLight!=nil) && (contIn.Light!=nil) {
+       // There are temp min or max set in the B/L definition and incoming container data has
+       //  a temperature reading. We need to perform a temperature alert check
+       humIn:= *contIn.Light
+       if blReg.MaxLight!=nil {
+           if humIn > *blReg.MaxLight {
+               val = above
+               alert.LightAlert = &val
+               complianceAlert = true
+           }
+       } else if blReg.MinLight!=nil {
+           if humIn < *blReg.MinLight {
+               val = below
+               alert.LightAlert = &val
+                complianceAlert = true
+           }
+       }
+   }
+    fmt.Println("After light alert check")
+    // Acceleration alert check
+   if (blReg.MinAcceleration!=nil || blReg.MaxAcceleration!=nil) && (contIn.Acceleration!=nil) {
+       // There are temp min or max set in the B/L definition and incoming container data has
+       //  a temperature reading. We need to perform a temperature alert check
+       humIn:= *contIn.Acceleration
+       if blReg.MaxAcceleration!=nil {
+           if humIn > *blReg.MaxAcceleration {
+               val = above
+               alert.AccAlert = &val
+               complianceAlert = true
+           }
+       } else if blReg.MinAcceleration!=nil {
+           if humIn < *blReg.MinAcceleration {
+               val = below
+               alert.AccAlert = &val
+                complianceAlert = true
+           }
+       }
+   }
+    fmt.Println("After acceleration alert check")
+   ///////////////////////////////////////////////////
+   // Note to self: 
+   // Look at Reworking above using reflection or at least a sub-function ?
+   ////////////////////////////////////////////
     if contIn.DoorClosed!=nil {
         if *contIn.DoorClosed == false {
             dAlert:=true
@@ -615,20 +719,20 @@ func (t *SimpleChaincode) alertsCheck(stub shim.ChaincodeStubInterface, contIn c
         }
         
     }
+     fmt.Println("After door alert check")
     if complianceAlert {
-        cAlert, err = json.Marshal(&alert)
-        fmt.Println(string(cAlert))
+        cAlert, err := json.Marshal(&alert)
         if err !=nil {
             err = errors.New("Unable to marshal alert data")
-            fmt.Println(err)
-            return nil, err
+		    fmt.Println(err)
+		    return nil, err
         }
         contAlert = cAlert
     } 
       return contAlert, nil
 }
-/*********************************  internal: mergePartialState ****************************/   
- func (t *SimpleChaincode) mergePartialState(oldState common.ContainerLogistics, newState common.ContainerLogistics) (common.ContainerLogistics,  error) {
+/*********************************  internal: mergePartialState ****************************/	
+ func (t *SimpleChaincode) mergePartialState(oldState ContainerLogistics, newState ContainerLogistics) (ContainerLogistics,  error) {
      
     old := reflect.ValueOf(&oldState).Elem()
     new := reflect.ValueOf(&newState).Elem()
@@ -636,40 +740,13 @@ func (t *SimpleChaincode) alertsCheck(stub shim.ChaincodeStubInterface, contIn c
         oldOne:=old.Field(i)
         newOne:=new.Field(i)
         if ! reflect.ValueOf(newOne.Interface()).IsNil() {
-            //fmt.Println("New is", newOne.Interface())
-            //fmt.Println("Old is ",oldOne.Interface())
-            oldOne.Set(reflect.Value(newOne))
-            //fmt.Println("Updated Old is ",oldOne.Interface())
-        }/* else {
+            fmt.Println("New is", newOne.Interface())
             fmt.Println("Old is ",oldOne.Interface())
-        }*/
+            oldOne.Set(reflect.Value(newOne))
+            fmt.Println("Updated Old is ",oldOne.Interface())
+        } else {
+            fmt.Println("Old is ",oldOne.Interface())
+        }
     }
     return oldState, nil
- }
-/*********************************  internal: mergePartialState ****************************/   
- func (t *SimpleChaincode) inRange(minVal *float64, maxVal *float64, actVal *float64) (common.Variation,  error) {
-    var val common.Variation 
-    
-    if minVal!=nil || maxVal!=nil {
-        fmt.Println("minVal ", *minVal)
-        fmt.Println("maxVal ", *maxVal)
-        fmt.Println("actVal ", *actVal)
-       // If either min or max value has been received and actual is not blank we need to perform an alert check
-       if maxVal!=nil {
-           fmt.Println("In max check")
-           if *actVal > *maxVal {
-               fmt.Println(*actVal)
-               val =common.Above
-               return val, nil
-           }
-       }
-       if minVal!=nil {
-           if *actVal < *minVal {
-               val =common.Below
-               return val, nil
-           }
-       }
-    }
-    val = common.Normal
-    return val, nil
  }

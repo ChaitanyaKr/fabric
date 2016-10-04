@@ -1,4 +1,4 @@
-package compliance
+package main
 import (
     "encoding/json"
     "errors"
@@ -7,7 +7,6 @@ import (
     "reflect"
  //  "github.com/mcuadros/go-jsonschema-generator"
 "github.com/hyperledger/fabric/core/chaincode/shim"
-common "github.com/hyperledger/fabric/examples/chaincode/go/iot/common" 
 )
 // This contract is meant for complianace management
 // Originally designed to track compliance for shipping contract's container data
@@ -18,6 +17,7 @@ const STATE string = "STATE"
 
 const CONTRACTVERSIONKEY string = "COMPLIANCE" 
 const SEP string = "_"
+const MYVERSION string = "1.0.0"
 const DEFTYPE string = "SHIPPING"
 
 type ContractVersion struct {
@@ -26,7 +26,7 @@ type ContractVersion struct {
 } 
 
 type ComplianceHistory struct {
-    CompHistory []string `json:"comphistory"`
+	CompHistory []string `json:"comphistory"`
 }
 
 
@@ -42,16 +42,24 @@ type ComplianceHistory struct {
 type SimpleChaincode struct {
 }
 
-
+// Compliance record structure
+type ComplianceState struct {
+    BLNo                 *string                     `json:"blno"` 
+    Type                 *string                     `json:"type"` // Default: DEFTYPE
+    Compliance           *bool                       `json:"compliance"`
+    AssetAlerts          *map[string]string          `json:"assetalerts"`
+    Active               *bool                       `json:"active,omitempty"`
+    Timestamp            *string                      `json:"timestamp"`
+}
 //************* main *******************
 //Create SimpleChaincode instance
 //************* main *******************
 
 func main() {
-    err := shim.Start(new(SimpleChaincode))
-    if err != nil {
-        fmt.Printf("Error starting Simple Chaincode: %s", err)
-    }
+	err := shim.Start(new(SimpleChaincode))
+	if err != nil {
+		fmt.Printf("Error starting Simple Chaincode: %s", err)
+	}
 }
 //***********************************************************
 // First the chaincode functions - Init, Invoke and Query
@@ -59,15 +67,15 @@ func main() {
 
 /************************ Init function ********************/
 
-func (t *SimpleChaincode) Init(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
-    // The  compliance data is categorized based on complaince type, passed in as function 
+func (t *SimpleChaincode) Init(stub *shim.ChaincodeStub, function string, args []string) ([]byte, error) {
+	// The  compliance data is categorized based on complaince type, passed in as function 
     //Interpretation: This stands for the business function being addressed
-    // For example, the compliance type could be 'Shipping' in the shipping case
-    // Assuming one contract instance can manage multiple asset (eg. container), BLNo(eg. B/L) scenarios
-    // A new intance need NOT be created for every business instance eg. every bill of lading
-    
-    var cVersion ContractVersion
-    var err error
+	// For example, the compliance type could be 'Shipping' in the shipping case
+	// Assuming one contract instance can manage multiple asset (eg. container), BLNo(eg. B/L) scenarios
+	// A new intance need NOT be created for every business instance eg. every bill of lading
+	
+	var cVersion ContractVersion
+	var err error
 
     if len(args) != 1 {
         return nil, errors.New("init expects one argument, a JSON string with tagged version and type")
@@ -79,9 +87,9 @@ func (t *SimpleChaincode) Init(stub shim.ChaincodeStubInterface, function string
     // This needs expansion: Once versioning implementation is sorted out on the hyperledger side
     fmt.Println ("Inside init")
     ver:=strings.TrimSpace(cVersion.Version)
-    if ver != common.MYVERSION {
-        fmt.Println ("Contract version " + common.MYVERSION + " must match version argument: " + cVersion.Version)
-        return nil, errors.New("Contract version " + common.MYVERSION + " must match version argument: " + cVersion.Version)
+    if ver != MYVERSION {
+        fmt.Println ("Contract version " + MYVERSION + " must match version argument: " + cVersion.Version)
+        return nil, errors.New("Contract version " + MYVERSION + " must match version argument: " + cVersion.Version)
     }
     bizType:=strings.TrimSpace(cVersion.Type)
      if bizType=="" {
@@ -101,12 +109,12 @@ func (t *SimpleChaincode) Init(stub shim.ChaincodeStubInterface, function string
          fmt.Println ("Contract state failed PUT to ledger")
         return nil, errors.New("Contract state failed PUT to ledger: " + fmt.Sprint(err))
     }
-    return nil, nil
+	return nil, nil
 }
 
 /************************ Invoke function ********************/
 
-func (t *SimpleChaincode) Invoke(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
+func (t *SimpleChaincode) Invoke(stub *shim.ChaincodeStub, function string, args []string) ([]byte, error) {
      invFunc :=strings.TrimSpace(function)
     switch invFunc {
         case "createUpdateComplianceRecord" :
@@ -122,7 +130,7 @@ func (t *SimpleChaincode) Invoke(stub shim.ChaincodeStubInterface, function stri
 
 /************************ Query function ********************/
 
-func (t *SimpleChaincode) Query(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
+func (t *SimpleChaincode) Query(stub *shim.ChaincodeStub, function string, args []string) ([]byte, error) {
     qFunc :=strings.TrimSpace(function)
     switch qFunc {
         case "readComplianceHistory" :
@@ -136,10 +144,10 @@ func (t *SimpleChaincode) Query(stub shim.ChaincodeStubInterface, function strin
 
 /************************ Invoke functions ********************/
 
-func (t *SimpleChaincode) createUpdateComplianceRecord(stub shim.ChaincodeStubInterface, args []string) ([]byte, error) {
+func (t *SimpleChaincode) createUpdateComplianceRecord(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
     var compHistoryState []byte
     var compHistKey     string
-    var compStubState   common.ComplianceState
+    var compStubState   ComplianceState
     var complianceHistory ComplianceHistory
   
     compInState, compData, err:= t.validateAndGet(stub, args)
@@ -214,8 +222,8 @@ func (t *SimpleChaincode) createUpdateComplianceRecord(stub shim.ChaincodeStubIn
 
  /*********************************  archiveComplianceRecord ****************************/
     
- func (t *SimpleChaincode) archiveComplianceRecord(stub shim.ChaincodeStubInterface, args []string) ([]byte, error) {
-   var compStubState   common.ComplianceState
+ func (t *SimpleChaincode) archiveComplianceRecord(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
+   var compStubState   ComplianceState
     compInState, compData, err:= t.validateAndGet(stub, args)
     err = json.Unmarshal([]byte(compData), &compStubState)
     if err != nil {
@@ -241,8 +249,8 @@ func (t *SimpleChaincode) createUpdateComplianceRecord(stub shim.ChaincodeStubIn
      
   /*********************************  resetComplianceHistory ****************************/
       
- func (t *SimpleChaincode) resetComplianceHistory(stub shim.ChaincodeStubInterface, args []string) ([]byte, error) {
-    var compStubState   common.ComplianceState
+ func (t *SimpleChaincode) resetComplianceHistory(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
+    var compStubState   ComplianceState
     mAlerts:= make(map[string]string)
     mAlerts[" "]=" "
     compInState, compData, err:= t.validateAndGet(stub, args)
@@ -263,8 +271,8 @@ func (t *SimpleChaincode) createUpdateComplianceRecord(stub shim.ChaincodeStubIn
     err = stub.DelState(compHistKey)
     if err!=nil {
         err = errors.New("Compliance data history delete failed")
-        fmt.Println(err)
-        return nil, err
+		fmt.Println(err)
+		return nil, err
     }
     compStubJSON, err := json.Marshal(compStubState)
     if err != nil {
@@ -279,7 +287,7 @@ func (t *SimpleChaincode) createUpdateComplianceRecord(stub shim.ChaincodeStubIn
     return nil, nil
  } 
   /*********************************  resetComplianceHistory ****************************/
- func (t *SimpleChaincode) readCurrentComplianceState(stub shim.ChaincodeStubInterface, args []string) ([]byte, error) {
+ func (t *SimpleChaincode) readCurrentComplianceState(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
 
      _, compData, err:= t.validateAndGet(stub, args)
      if err !=nil {
@@ -288,7 +296,7 @@ func (t *SimpleChaincode) createUpdateComplianceRecord(stub shim.ChaincodeStubIn
      return []byte(compData), nil
  }
  /*********************************  resetComplianceHistory ****************************/
- func (t *SimpleChaincode) readComplianceHistory(stub shim.ChaincodeStubInterface, args []string) ([]byte, error) {
+ func (t *SimpleChaincode) readComplianceHistory(stub *shim.ChaincodeStub, args []string) ([]byte, error) {
 
     compInState, _, err:= t.validateAndGet(stub, args)
     compHistKey := *compInState.BLNo+SEP+STATE
@@ -299,8 +307,8 @@ func (t *SimpleChaincode) createUpdateComplianceRecord(stub shim.ChaincodeStubIn
      return comphistory, nil
  }
   
- /*********************************  internal: mergePartialState ****************************/  
- func (t *SimpleChaincode) mergePartialState(oldState common.ComplianceState, newState common.ComplianceState) (common.ComplianceState,  error) {
+ /*********************************  internal: mergePartialState ****************************/	
+ func (t *SimpleChaincode) mergePartialState(oldState ComplianceState, newState ComplianceState) (ComplianceState,  error) {
      
     old := reflect.ValueOf(&oldState).Elem()
     new := reflect.ValueOf(&newState).Elem()
@@ -318,10 +326,10 @@ func (t *SimpleChaincode) createUpdateComplianceRecord(stub shim.ChaincodeStubIn
     }
     return oldState, nil
  }
- /*********************************  internal: validateAndGet ****************************/ 
- func (t *SimpleChaincode) validateAndGet(stub shim.ChaincodeStubInterface, args []string) (common.ComplianceState,  string, error){
+ /*********************************  internal: validateAndGet ****************************/	
+ func (t *SimpleChaincode) validateAndGet(stub *shim.ChaincodeStub, args []string) (ComplianceState,  string, error){
      //Assumption: One record at a time.
-    var compInState     common.ComplianceState
+    var compInState     ComplianceState
     //var compStubState   ComplianceState
     var sErr string = ""
     var compstr string
@@ -329,10 +337,10 @@ func (t *SimpleChaincode) createUpdateComplianceRecord(stub shim.ChaincodeStubIn
     
     if len(args) !=1 {
         err = errors.New("Expecting a single JSON string with mandatory Key, compliance flag, compliance data, active flag and timestamp ")
-        fmt.Println(err)
-        return compInState , sErr, err
+		fmt.Println(err)
+		return compInState , sErr, err
         // Though written for a shipping use case, this can easily be explanded to listen to multiple compliance scenarios
-    }
+	}
     jsonData:=args[0]
     // Marshaling the input to the ComplianceState structure. If a value is not
     // sent in, it is defaulted as null. This allows partial updates.
@@ -342,13 +350,13 @@ func (t *SimpleChaincode) createUpdateComplianceRecord(stub shim.ChaincodeStubIn
     err = json.Unmarshal(compJSON, &compInState)
     if err != nil {
         //err = errors.New("Unable to unmarshal input JSON data")
-        fmt.Println(err)
-        return compInState , sErr, err
+		fmt.Println(err)
+		return compInState , sErr, err
     }
     if strings.TrimSpace(*compInState.BLNo) =="" {
         err = errors.New("The Primary Key is mandatory. For example Bill of Lading number for Shipping")
-        fmt.Println(err)
-        return compInState , sErr, err
+		fmt.Println(err)
+		return compInState , sErr, err
     }
     
     compData, err := stub.GetState(*compInState.BLNo)
